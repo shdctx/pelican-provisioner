@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PelicanProvisioner\Filament\Admin\Resources\Users\RelationManagers;
 
+use App\Models\User;
+use Filament\Actions\CreateAction;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
@@ -18,6 +20,9 @@ use PelicanProvisioner\Filament\Admin\Resources\ResourceQuotas\ResourceQuotaReso
 use PelicanProvisioner\Models\ResourceQuota;
 use PelicanProvisioner\Services\UsageQuery;
 
+/**
+ * A user has at most one quota, so the create button disappears once there is one. Creating follows the quota list: the Quota create permission, and a normal admin cannot give a root admin a quota.
+ */
 class ResourceQuotaRelationManager extends RelationManager
 {
     protected static string $relationship = 'provisionerQuota';
@@ -62,6 +67,11 @@ class ResourceQuotaRelationManager extends RelationManager
                         return app(UsageQuery::class)->forOwner((int) $record->user_id)->servers;
                     }),
             ])
+            ->headerActions([
+                CreateAction::make()
+                    ->createAnother(false)
+                    ->authorize(fn (): bool => $this->canCreateQuota()),
+            ])
             ->recordActions([
                 ViewAction::make()
                     ->hidden(fn (ResourceQuota $record): bool => static::getEditAuthorizationResponse($record)->allowed()),
@@ -71,6 +81,19 @@ class ResourceQuotaRelationManager extends RelationManager
             ->paginated(false)
             ->emptyStateIcon('tabler-cube-plus')
             ->emptyStateDescription(trans('pelican-provisioner::strings.admin.empty_user'));
+    }
+
+    public function canCreateQuota(): bool
+    {
+        $owner = $this->getOwnerRecord();
+        $actor = user();
+
+        return !$this->isReadOnly()
+            && $owner instanceof User
+            && $actor instanceof User
+            && $actor->can('create', ResourceQuota::class)
+            && $actor->canTarget($owner)
+            && !ResourceQuota::query()->where('user_id', $owner->id)->exists();
     }
 
     public function form(Schema $schema): Schema

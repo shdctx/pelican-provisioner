@@ -15,6 +15,7 @@ use App\Models\Server;
 use App\Models\Subuser;
 use App\Models\User;
 use Dotenv\Dotenv;
+use Filament\Actions\Testing\TestAction;
 use Filament\Facades\Filament;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Cache;
@@ -148,10 +149,11 @@ clear_rate_limits();
 
 as_user('alice');
 config()->set('pelican-provisioner.can_users_update_servers', 'false');
-check('switching resizing off closes the page', ServerResourcePage::canAccess(), false);
+check('with resizing off and deleting on, the page stays open for deleting', ServerResourcePage::canAccess(), true);
 check('switching resizing off stops the service', outcome(fn () => resize($server, 30, 64, 64)), 'http 403');
-config()->set('pelican-provisioner.can_users_update_servers', 'true');
 config()->set('pelican-provisioner.can_users_delete_servers', 'false');
+check('with both off, the page is closed', ServerResourcePage::canAccess(), false);
+config()->set('pelican-provisioner.can_users_update_servers', 'true');
 check('deleting is off by default', outcome(fn () => provisioner()->delete(Server::query()->findOrFail($server->id))), 'http 403');
 
 Server::query()->whereKey($server->id)->update(['owner_id' => $bob->id]);
@@ -251,9 +253,20 @@ as_user('admin');
 check('a root admin can pick anyone', ResourceQuotaResource::selectableUsers(User::query())->pluck('username')->contains('admin'), true);
 check('a root admin sees emails', ResourceQuotaResource::canSeeEmails(), true);
 $rootQuota->delete();
+Filament::setCurrentPanel(Filament::getPanel('admin'));
+$quotaSection = fn (User $actor, User $owner): ResourceQuotaRelationManager => Livewire::actingAs($actor)
+    ->test(ResourceQuotaRelationManager::class, ['ownerRecord' => $owner, 'pageClass' => EditUser::class])
+    ->instance();
+as_user('qadmin');
+check('an editor can add a quota from a user page', $quotaSection($qadmin, $bob)->canCreateQuota(), true);
+check('an editor cannot add one to a root admin', $quotaSection($qadmin, $admin)->canCreateQuota(), false);
+check('a user page offers no second quota', $quotaSection($qadmin, $alice)->canCreateQuota(), false);
 $qadmin->syncRoles([Role::query()->where('name', 'QuotaViewer')->firstOrFail()]);
 $editor->delete();
 app(PermissionRegistrar::class)->forgetCachedPermissions();
+$qadmin = User::query()->findOrFail($qadmin->id);
+as_user('qadmin');
+check('a view-only role cannot add one from a user page', $quotaSection($qadmin, $bob)->canCreateQuota(), false);
 
 section('Saving settings');
 
@@ -364,6 +377,14 @@ check('a size over the quota is refused with the right limit', $page->errors()->
 ResourceQuota::query()->where('user_id', $alice->id)->update(['memory' => 64]);
 $page = $openResizeForm()->set('data.memory', 100)->call('save');
 check('an owner over quota can shrink through the form', [$page->errors()->toArray(), Server::query()->findOrFail($server->id)->memory], [[], 100]);
+config()->set('pelican-provisioner.can_users_update_servers', 'false');
+config()->set('pelican-provisioner.can_users_delete_servers', 'true');
+$page = $openResizeForm();
+check('with resizing off, the fields are locked', outcome(fn () => $page->assertFormFieldDisabled('cpu')->assertFormFieldDisabled('memory')->assertFormFieldDisabled('disk')), 'allowed');
+check('and there is no save button', outcome(fn () => $page->assertActionHidden('save')), 'allowed');
+check('but the delete button is there', outcome(fn () => $page->assertActionVisible('delete_server')), 'allowed');
+$page->callAction('delete_server');
+check('and deletes the server', Server::query()->whereKey($server->id)->exists(), false);
 
 section('Pages render for their intended users');
 
@@ -374,6 +395,14 @@ as_user('admin');
 Filament::setCurrentPanel(Filament::getPanel('admin'));
 check('admin quota list', outcome(fn () => Livewire::actingAs($admin)->test(ManageResourceQuotas::class)->call('loadTable')), 'allowed');
 check('quota section on the admin user page', outcome(fn () => Livewire::actingAs($admin)->test(ResourceQuotaRelationManager::class, ['ownerRecord' => $alice, 'pageClass' => EditUser::class])), 'allowed');
+$bobSection = fn () => Livewire::actingAs($admin)->test(ResourceQuotaRelationManager::class, ['ownerRecord' => $bob, 'pageClass' => EditUser::class]);
+check('a user without a quota gets a create button', outcome(fn () => $bobSection()->assertActionVisible(TestAction::make('create')->table())), 'allowed');
+check('creating from the user page works', outcome(fn () => $bobSection()
+    ->callAction(TestAction::make('create')->table(), data: ['cpu' => 50, 'memory' => 512, 'disk' => 1024, 'server_limit' => 2])
+    ->assertHasNoErrors()), 'allowed');
+check('and the quota belongs to that user', ResourceQuota::query()->where('user_id', $bob->id)->value('memory'), 512);
+check('then the button is gone', outcome(fn () => $bobSection()->assertActionHidden(TestAction::make('create')->table())), 'allowed');
+ResourceQuota::query()->where('user_id', $bob->id)->delete();
 
 section('Audit trail');
 

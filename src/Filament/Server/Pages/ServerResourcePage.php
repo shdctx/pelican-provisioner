@@ -27,7 +27,7 @@ use PelicanProvisioner\Services\SettingsRepository;
 use PelicanProvisioner\Services\UsageQuery;
 
 /**
- * Only the owner can open this page. A Wings HTTP error after the row is saved is shown as a warning, because a missing server on the node used to become an unhandled 500. The form is filled with the three fields it edits, because the parent would send the whole server row to the browser.
+ * Only the owner can open this page, and only while resizing or deleting is turned on. Deleting lives here too, so the page stays open with the fields locked when only deleting is on. A Wings HTTP error after the row is saved is shown as a warning, because a missing server on the node used to become an unhandled 500. The form is filled with the three fields it edits, because the parent would send the whole server row to the browser.
  */
 class ServerResourcePage extends ServerFormPage
 {
@@ -54,7 +54,9 @@ class ServerResourcePage extends ServerFormPage
             return false;
         }
 
-        if (!app(SettingsRepository::class)->current()->usersCanUpdate) {
+        $settings = app(SettingsRepository::class)->current();
+
+        if (!$settings->usersCanUpdate && !$settings->usersCanDelete) {
             return false;
         }
 
@@ -101,6 +103,7 @@ class ServerResourcePage extends ServerFormPage
     {
         return [
             Action::make('save')
+                ->visible(fn (): bool => self::canResize())
                 ->label(trans('filament-panels::resources/pages/edit-record.form.actions.save.label'))
                 ->action('save')
                 ->keyBindings(['mod+s'])
@@ -196,6 +199,7 @@ class ServerResourcePage extends ServerFormPage
             ->label(trans('pelican-provisioner::strings.'.$name))
             ->required()
             ->integer()
+            ->disabled(fn (): bool => !self::canResize())
             ->live(onBlur: true)
             ->minValue(fn (): int => $this->bounds($name)['min'])
             ->maxValue(fn (): int => $this->bounds($name)['max'])
@@ -210,7 +214,7 @@ class ServerResourcePage extends ServerFormPage
                 $typed = is_numeric($state) ? (int) $state : 0;
 
                 return trans('pelican-provisioner::strings.widget.remaining', [
-                    'amount' => max(0, $bounds['max'] - $typed).$suffix,
+                    'amount' => max(0, $bounds['max'] - $typed).($suffix === '%' ? '%' : ' '.$suffix),
                 ]);
             });
     }
@@ -257,6 +261,11 @@ class ServerResourcePage extends ServerFormPage
 
         // Keeping or reducing the current size stays possible when the quota is already spent.
         return ['min' => 1, 'max' => max($maximum, $current)];
+    }
+
+    private static function canResize(): bool
+    {
+        return app(SettingsRepository::class)->current()->usersCanUpdate;
     }
 
     private function memorySuffix(): string
